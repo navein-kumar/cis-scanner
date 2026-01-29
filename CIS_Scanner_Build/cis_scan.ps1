@@ -1,21 +1,32 @@
 <#
 .SYNOPSIS
-    CIS Benchmark Scanner v2.5
+    CIS Benchmark Scanner v2.5.1
     CodeSecure Solutions
-    
-.PARAMETER Policy
-    Optional: Specify custom policy file name
 #>
 
-param(
-    [Parameter(Mandatory=$false)]
-    [string]$Policy = ""
-)
+param([string]$Policy = "")
+
+# Keep window open on error
+trap {
+    Write-Host ""
+    Write-Host "==================== ERROR ====================" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host "Line: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Yellow
+    Write-Host "===============================================" -ForegroundColor Red
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+
+$ErrorActionPreference = "Stop"
+
+try {
 
 #==============================================================================
 # CONFIGURATION
 #==============================================================================
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+if ([string]::IsNullOrEmpty($ScriptDir)) { $ScriptDir = Get-Location }
+
 $PolicyFolder = Join-Path $ScriptDir "policy"
 $Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 $Hostname = $env:COMPUTERNAME
@@ -42,6 +53,26 @@ $FailCount = 0
 $NACount = 0
 $ErrorCount = 0
 
+Write-Host ""
+Write-Host "=============================================="  -ForegroundColor Cyan
+Write-Host "  CIS Benchmark Scanner v2.5.1 - CodeSecure"    -ForegroundColor Cyan
+Write-Host "=============================================="  -ForegroundColor Cyan
+Write-Host ""
+Write-Host "[*] Script Dir: $ScriptDir" -ForegroundColor Gray
+
+# Check policy folder
+if (!(Test-Path $PolicyFolder)) {
+    Write-Host "[-] ERROR: Policy folder not found!" -ForegroundColor Red
+    Write-Host "[-] Expected: $PolicyFolder" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Make sure 'policy' folder exists with YAML files" -ForegroundColor Yellow
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+
+Write-Host "[+] Policy folder found: $PolicyFolder" -ForegroundColor Green
+
+# Get OS info
 $OS = Get-CimInstance Win32_OperatingSystem
 $OSCaption = $OS.Caption
 $OSBuild = $OS.BuildNumber
@@ -64,21 +95,31 @@ if ($Policy -ne "") {
 } else {
     $PolicyFileName = $PolicyFiles[$DetectedOS]
 }
+
 $LocalPolicy = Join-Path $PolicyFolder $PolicyFileName
 
-#==============================================================================
-# EXTRACT POLICY NAME FROM YAML
-#==============================================================================
-$PolicyName = $PolicyFileName  # Default fallback
+# Check policy file
+if (!(Test-Path $LocalPolicy)) {
+    Write-Host "[-] ERROR: Policy file not found!" -ForegroundColor Red
+    Write-Host "[-] Expected: $LocalPolicy" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Available policies:" -ForegroundColor Yellow
+    Get-ChildItem $PolicyFolder -Filter "*.yml" -ErrorAction SilentlyContinue | ForEach-Object { 
+        Write-Host "    - $($_.Name)" -ForegroundColor Gray 
+    }
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+
+Write-Host "[+] Policy file found: $PolicyFileName" -ForegroundColor Green
+
+# Extract policy name
+$PolicyName = $PolicyFileName
 $PolicyContent = Get-Content $LocalPolicy -Raw -Encoding UTF8
 if ($PolicyContent -match 'policy:\s*\n(?:.*\n)*?\s*name:\s*"([^"]+)"') {
     $PolicyName = $matches[1]
 }
 
-Write-Host ""
-Write-Host "=============================================="  -ForegroundColor Cyan
-Write-Host "  CIS Benchmark Scanner v2.5 - CodeSecure"      -ForegroundColor Cyan
-Write-Host "=============================================="  -ForegroundColor Cyan
 Write-Host ""
 Write-Host "[*] Host: $Hostname" -ForegroundColor Yellow
 Write-Host "[*] OS: $OSCaption (Build $OSBuild)" -ForegroundColor Yellow
@@ -87,58 +128,35 @@ Write-Host "[*] Policy: $PolicyName" -ForegroundColor Yellow
 Write-Host "[*] Started: $(Get-Date)" -ForegroundColor Yellow
 Write-Host ""
 
-if (!(Test-Path $PolicyFolder)) {
-    Write-Host "[-] Policy folder not found: $PolicyFolder" -ForegroundColor Red
-    Read-Host "Press Enter to exit"
-    exit 1
-}
-
-if (!(Test-Path $LocalPolicy)) {
-    Write-Host "[-] Policy file not found: $LocalPolicy" -ForegroundColor Red
-    Write-Host "[-] Available policies:" -ForegroundColor Yellow
-    Get-ChildItem $PolicyFolder -Filter "*.yml" | ForEach-Object { Write-Host "    - $($_.Name)" }
-    Read-Host "Press Enter to exit"
-    exit 1
-}
-
-Write-Host "[+] Using local policy: $LocalPolicy" -ForegroundColor Green
-Write-Host ""
-
 #==============================================================================
 # HELPER
 #==============================================================================
 function Escape-Html {
     param([string]$Text)
     if ([string]::IsNullOrEmpty($Text)) { return "" }
-    $Text = $Text -replace '&', '&amp;'
-    $Text = $Text -replace '<', '&lt;'
-    $Text = $Text -replace '>', '&gt;'
-    $Text = $Text -replace '"', '&quot;'
+    $Text = $Text -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;' -replace '"', '&quot;'
     return $Text
 }
 
 #==============================================================================
-# YAML PARSER - EXACT v2.0 REGEX (DO NOT MODIFY!)
+# YAML PARSER
 #==============================================================================
 function Parse-WazuhPolicy {
     param([string]$FilePath)
     
+    Write-Host "[*] Parsing policy file..." -ForegroundColor Cyan
+    
     $content = Get-Content $FilePath -Raw -Encoding UTF8
     $checks = @()
-    
-    # EXACT v2.0 PATTERN
     $pattern = '(?s)-\s*id:\s*(\d+)\s*\n\s*title:\s*"([^"]+)".*?(?:compliance:.*?cis:\s*\["([^"]+)"\])?.*?condition:\s*(\w+)\s*\n\s*rules:\s*\n((?:\s*-\s*''[^'']+''(?:\n|$))+)'
     
-    $matches = [regex]::Matches($content, $pattern)
+    $regexMatches = [regex]::Matches($content, $pattern)
     
-    foreach ($m in $matches) {
+    foreach ($m in $regexMatches) {
         $rulesBlock = $m.Groups[5].Value
         $rules = @()
-        
         $ruleMatches = [regex]::Matches($rulesBlock, "-\s*'([^']+)'")
-        foreach ($rm in $ruleMatches) {
-            $rules += $rm.Groups[1].Value
-        }
+        foreach ($rm in $ruleMatches) { $rules += $rm.Groups[1].Value }
         
         if ($rules.Count -gt 0) {
             $checks += @{
@@ -151,6 +169,7 @@ function Parse-WazuhPolicy {
         }
     }
     
+    Write-Host "[+] Parsed $($checks.Count) checks" -ForegroundColor Green
     return $checks
 }
 
@@ -161,25 +180,13 @@ function Get-CheckMetadata {
     param([string]$FilePath, [string]$CheckId)
     
     $content = Get-Content $FilePath -Raw -Encoding UTF8
-    $metadata = @{
-        description = ""
-        rationale = ""
-        remediation = ""
-        compliance = @()
-    }
+    $metadata = @{ description = ""; rationale = ""; remediation = ""; compliance = @() }
     
     if ($content -match "(?s)-\s*id:\s*$CheckId\s*\n(.+?)(?=\n\s*-\s*id:\s*\d+|\z)") {
         $block = $matches[1]
-        
-        if ($block -match 'description:\s*"([^"]{1,400})') {
-            $metadata.description = $matches[1]
-        }
-        if ($block -match 'rationale:\s*"([^"]{1,400})') {
-            $metadata.rationale = $matches[1]
-        }
-        if ($block -match 'remediation:\s*"([^"]{1,400})') {
-            $metadata.remediation = $matches[1]
-        }
+        if ($block -match 'description:\s*"([^"]{1,400})') { $metadata.description = $matches[1] }
+        if ($block -match 'rationale:\s*"([^"]{1,400})') { $metadata.rationale = $matches[1] }
+        if ($block -match 'remediation:\s*"([^"]{1,400})') { $metadata.remediation = $matches[1] }
         
         $frameworks = @()
         if ($block -match 'cis:\s*\["([^"]+)"\]') { $frameworks += "CIS: $($matches[1])" }
@@ -190,18 +197,16 @@ function Get-CheckMetadata {
         if ($block -match 'cmmc[^:]*:\s*\["([^"]+)"') { $frameworks += "CMMC: $($matches[1])" }
         $metadata.compliance = $frameworks
     }
-    
     return $metadata
 }
 
 #==============================================================================
-# RULE EVALUATORS (EXACT v2.0 LOGIC)
+# RULE EVALUATORS
 #==============================================================================
 function Compare-Numeric {
     param($Value, [string]$Operator, $Expected)
     try {
-        $val = [double]$Value
-        $exp = [double]$Expected
+        $val = [double]$Value; $exp = [double]$Expected
         switch ($Operator) {
             ">="  { return $val -ge $exp }
             "<="  { return $val -le $exp }
@@ -216,7 +221,6 @@ function Compare-Numeric {
 
 function Evaluate-RegistryRule {
     param([string]$Rule, [bool]$Negated = $false)
-    
     $result = @{ Status = "FAIL"; Value = ""; Details = "" }
     
     try {
@@ -225,44 +229,39 @@ function Evaluate-RegistryRule {
         $valueName = if ($parts.Count -ge 2) { $parts[1].Trim() } else { $null }
         $comparison = if ($parts.Count -ge 3) { $parts[2].Trim() } else { $null }
         
-        $keyPath = $keyPath -replace 'HKEY_LOCAL_MACHINE', 'HKLM:'
-        $keyPath = $keyPath -replace 'HKLM\\', 'HKLM:\'
-        $keyPath = $keyPath -replace 'HKEY_CURRENT_USER', 'HKCU:'
-        $keyPath = $keyPath -replace 'HKCU\\', 'HKCU:\'
-        $keyPath = $keyPath -replace '\\\\', '\'
+        $originalKeyPath = $keyPath
+        $keyPath = $keyPath -replace 'HKEY_LOCAL_MACHINE', 'HKLM:' -replace 'HKLM\\', 'HKLM:\' -replace 'HKEY_CURRENT_USER', 'HKCU:' -replace 'HKCU\\', 'HKCU:\' -replace '\\\\', '\'
         
         if (!(Test-Path $keyPath)) {
             $result.Status = if ($Negated) { "PASS" } else { "FAIL" }
-            $result.Details = "Key not found"
+            $result.Value = "[Key Not Found]"
             return $result
         }
         
         if (!$valueName) {
             $result.Status = if ($Negated) { "FAIL" } else { "PASS" }
-            $result.Details = "Key exists"
+            $result.Value = "[Key Exists]"
             return $result
         }
         
         try {
             $regKey = Get-ItemProperty -Path $keyPath -Name $valueName -ErrorAction Stop
             $actualValue = $regKey.$valueName
-            $result.Value = $actualValue
+            $result.Value = "[Found] $valueName = $actualValue"
         } catch {
             $result.Status = if ($Negated) { "PASS" } else { "FAIL" }
-            $result.Details = "Value not found: $valueName"
+            $result.Value = "[Value Not Found] $valueName"
             return $result
         }
         
         if (!$comparison) {
             $result.Status = if ($Negated) { "FAIL" } else { "PASS" }
-            $result.Details = "Value exists: $actualValue"
             return $result
         }
         
         if ($comparison -match '^n:\^?\(\\d\+\)\s*compare\s*([<>=!]+)\s*(\d+)') {
             $passed = Compare-Numeric -Value $actualValue -Operator $matches[1] -Expected $matches[2]
             $result.Status = if ($passed -xor $Negated) { "PASS" } else { "FAIL" }
-            $result.Details = "$actualValue $($matches[1]) $($matches[2])"
             return $result
         }
         
@@ -270,32 +269,27 @@ function Evaluate-RegistryRule {
             $pass1 = Compare-Numeric -Value $actualValue -Operator $matches[1] -Expected $matches[2]
             $pass2 = Compare-Numeric -Value $actualValue -Operator $matches[3] -Expected $matches[4]
             $result.Status = if (($pass1 -and $pass2) -xor $Negated) { "PASS" } else { "FAIL" }
-            $result.Details = "$actualValue in range"
             return $result
         }
         
         if ($comparison -match '^r:(.+)$') {
             $passed = $actualValue -match $matches[1]
             $result.Status = if ($passed -xor $Negated) { "PASS" } else { "FAIL" }
-            $result.Details = "Regex: $($matches[1])"
             return $result
         }
         
         $passed = ($actualValue -eq $comparison) -or ($actualValue.ToString() -eq $comparison)
         $result.Status = if ($passed -xor $Negated) { "PASS" } else { "FAIL" }
-        $result.Details = "Expected: $comparison, Got: $actualValue"
         
     } catch {
         $result.Status = "ERROR"
-        $result.Details = $_.Exception.Message
+        $result.Value = "[Error] $($_.Exception.Message)"
     }
-    
     return $result
 }
 
 function Evaluate-CommandRule {
     param([string]$Rule, [bool]$Negated = $false)
-    
     $result = @{ Status = "FAIL"; Value = ""; Details = "" }
     
     try {
@@ -303,13 +297,22 @@ function Evaluate-CommandRule {
         $command = $parts[0].Trim()
         $comparison = if ($parts.Count -ge 2) { $parts[1].Trim() } else { $null }
         
+        $ErrorActionPreference = "SilentlyContinue"
         if ($command -match '^powershell\s+(.+)$') {
             $output = Invoke-Expression $matches[1] 2>&1 | Out-String
         } else {
             $output = cmd /c $command 2>&1 | Out-String
         }
+        $ErrorActionPreference = "Stop"
         $output = $output.Trim()
-        $result.Value = if ($output.Length -gt 100) { $output.Substring(0, 100) + "..." } else { $output }
+        
+        if ($output.Length -gt 200) {
+            $result.Value = "[Output] " + $output.Substring(0, 200) + "..."
+        } elseif ($output) {
+            $result.Value = "[Output] $output"
+        } else {
+            $result.Value = "[No Output]"
+        }
         
         if (!$comparison) {
             $passed = [bool]$output
@@ -318,19 +321,15 @@ function Evaluate-CommandRule {
         }
         
         if ($comparison -match '^n:(.+?)\s*=\s*\(\\d\+\)\s*compare\s*([<>=!]+)\s*(\d+)') {
-            $pattern = $matches[1]
-            $operator = $matches[2]
-            $expected = $matches[3]
-            
+            $pattern = $matches[1]; $operator = $matches[2]; $expected = $matches[3]
             if ($output -match "$pattern\s*=?\s*(\d+)") {
                 $extracted = $matches[1]
-                $result.Value = $extracted
+                $result.Value = "[Extracted] $pattern = $extracted"
                 $passed = Compare-Numeric -Value $extracted -Operator $operator -Expected $expected
                 $result.Status = if ($passed -xor $Negated) { "PASS" } else { "FAIL" }
-                $result.Details = "$extracted $operator $expected"
             } else {
                 $result.Status = if ($Negated) { "PASS" } else { "FAIL" }
-                $result.Details = "Pattern not matched"
+                $result.Value = "[Pattern Not Found]"
             }
             return $result
         }
@@ -338,7 +337,6 @@ function Evaluate-CommandRule {
         if ($comparison -match '^r:(.+)$') {
             $passed = $output -match $matches[1]
             $result.Status = if ($passed -xor $Negated) { "PASS" } else { "FAIL" }
-            $result.Details = "Regex match"
             return $result
         }
         
@@ -347,15 +345,13 @@ function Evaluate-CommandRule {
         
     } catch {
         $result.Status = "ERROR"
-        $result.Details = $_.Exception.Message
+        $result.Value = "[Error] $($_.Exception.Message)"
     }
-    
     return $result
 }
 
 function Evaluate-Rule {
     param([string]$Rule)
-    
     $negated = $false
     $cleanRule = $Rule.Trim()
     
@@ -365,31 +361,32 @@ function Evaluate-Rule {
     }
     
     if ($cleanRule -match '^r:') {
-        return Evaluate-RegistryRule -Rule $cleanRule -Negated $negated
+        $result = Evaluate-RegistryRule -Rule $cleanRule -Negated $negated
+        if ($negated -and $result.Value) { $result.Value = "(NOT) " + $result.Value }
+        return $result
     }
     elseif ($cleanRule -match '^c:') {
-        return Evaluate-CommandRule -Rule $cleanRule -Negated $negated
+        $result = Evaluate-CommandRule -Rule $cleanRule -Negated $negated
+        if ($negated -and $result.Value) { $result.Value = "(NOT) " + $result.Value }
+        return $result
     }
     
-    return @{ Status = "FAIL"; Value = ""; Details = "Unknown rule type" }
+    return @{ Status = "FAIL"; Value = "[Unknown Rule]" }
 }
 
 function Evaluate-Check {
     param($Check)
-    
     $ruleResults = @()
-    $lastValue = ""
-    $lastDetails = ""
+    $ruleValues = @()
     
     foreach ($rule in $Check.rules) {
         $eval = Evaluate-Rule -Rule $rule
         $ruleResults += $eval.Status
-        if ($eval.Value) { $lastValue = $eval.Value }
-        if ($eval.Details) { $lastDetails = $eval.Details }
+        if ($eval.Value) { $ruleValues += $eval.Value }
     }
     
     $finalResult = switch ($Check.condition) {
-        "all" {
+        "all" { 
             if ($ruleResults -contains "ERROR") { "ERROR" }
             elseif ($ruleResults -contains "FAIL") { "FAIL" }
             elseif (($ruleResults | Where-Object { $_ -eq "PASS" }).Count -eq $ruleResults.Count) { "PASS" }
@@ -408,20 +405,28 @@ function Evaluate-Check {
         default { "FAIL" }
     }
     
-    return @{ Status = $finalResult; Value = $lastValue; Details = $lastDetails }
+    $combinedValue = $ruleValues -join "`n"
+    return @{ Status = $finalResult; Value = $combinedValue; RuleResults = $ruleResults }
 }
 
 #==============================================================================
 # RUN SCAN
 #==============================================================================
-Write-Host "[*] Loading policy..." -ForegroundColor Cyan
 $Checks = Parse-WazuhPolicy -FilePath $LocalPolicy
-Write-Host "[+] Loaded $($Checks.Count) checks" -ForegroundColor Green
+
+if ($Checks.Count -eq 0) {
+    Write-Host "[-] ERROR: No checks parsed from policy!" -ForegroundColor Red
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+
 Write-Host ""
-Write-Host "[*] Scanning..." -ForegroundColor Cyan
+Write-Host "[*] Running $($Checks.Count) checks..." -ForegroundColor Cyan
 Write-Host ""
 
+$counter = 0
 foreach ($check in $Checks) {
+    $counter++
     $eval = Evaluate-Check -Check $check
     $meta = Get-CheckMetadata -FilePath $LocalPolicy -CheckId $check.id
     
@@ -439,8 +444,10 @@ foreach ($check in $Checks) {
         "ERROR" { "Magenta" }
     }
     
-    Write-Host "[$($eval.Status)] " -ForegroundColor $color -NoNewline
-    Write-Host "[$($check.cis_id)] $($check.title)"
+    # Progress every 50 checks
+    if ($counter % 50 -eq 0) {
+        Write-Host "[$counter/$($Checks.Count)] Processing..." -ForegroundColor Gray
+    }
     
     $Results += [PSCustomObject]@{
         CIS_ID = $check.cis_id
@@ -450,6 +457,7 @@ foreach ($check in $Checks) {
         Value = $eval.Value
         Condition = $check.condition
         Rules = $check.rules
+        RuleResults = $eval.RuleResults
         Description = $meta.description
         Rationale = $meta.rationale
         Remediation = $meta.remediation
@@ -457,15 +465,18 @@ foreach ($check in $Checks) {
     }
 }
 
+Write-Host ""
+Write-Host "[+] Scan completed: $PassCount Pass, $FailCount Fail" -ForegroundColor Green
+
 #==============================================================================
 # GENERATE REPORTS
 #==============================================================================
 Write-Host ""
 Write-Host "[*] Generating reports..." -ForegroundColor Cyan
 
-# CSV - flatten rules to string
 $CSVResults = $Results | Select-Object CIS_ID, Check_ID, Title, Status, Value, Condition, @{N='Rules';E={$_.Rules -join ' | '}}, Description, Rationale, Remediation, Compliance
 $CSVResults | Export-Csv -Path $CSVReport -NoTypeInformation -Encoding UTF8
+Write-Host "[+] CSV saved: $CSVReport" -ForegroundColor Green
 
 $Applicable = $PassCount + $FailCount
 $Score = if ($Applicable -gt 0) { [math]::Round(($PassCount / $Applicable) * 100, 1) } else { 0 }
@@ -476,50 +487,38 @@ $rowIndex = 0
 foreach ($r in $Results) {
     $detailsContent = ""
     
-    # Description
-    if ($r.Description) { 
-        $detailsContent += "<h4>Description</h4><p>$(Escape-Html $r.Description)</p>" 
-    }
+    if ($r.Description) { $detailsContent += "<h4>Description</h4><p>$(Escape-Html $r.Description)</p>" }
+    if ($r.Rationale) { $detailsContent += "<h4>Rationale</h4><p>$(Escape-Html $r.Rationale)</p>" }
+    if ($r.Remediation) { $detailsContent += "<h4>Remediation</h4><p>$(Escape-Html $r.Remediation)</p>" }
     
-    # Rationale
-    if ($r.Rationale) { 
-        $detailsContent += "<h4>Rationale</h4><p>$(Escape-Html $r.Rationale)</p>" 
-    }
-    
-    # Remediation
-    if ($r.Remediation) { 
-        $detailsContent += "<h4>Remediation</h4><p>$(Escape-Html $r.Remediation)</p>" 
-    }
-    
-    # Compliance tags
     if ($r.Compliance) {
         $tags = ($r.Compliance -split "; " | Where-Object { $_ } | ForEach-Object { "<span class='tag'>$_</span>" }) -join ""
         if ($tags) { $detailsContent += "<h4>Compliance</h4><div>$tags</div>" }
     }
     
-    # Rules & Condition (NEW!)
     if ($r.Rules -and $r.Rules.Count -gt 0) {
         $rulesHtml = "<h4>Checks (Condition: $($r.Condition))</h4><ul class='rules-list'>"
-        foreach ($rule in $r.Rules) {
-            $ruleEsc = Escape-Html $rule
-            $rulesHtml += "<li><code>$ruleEsc</code></li>"
+        for ($i = 0; $i -lt $r.Rules.Count; $i++) {
+            $ruleStatus = if ($r.RuleResults -and $r.RuleResults.Count -gt $i) { $r.RuleResults[$i] } else { "?" }
+            $statusClass = switch ($ruleStatus) { "PASS" { "rule-pass" } "FAIL" { "rule-fail" } default { "rule-unknown" } }
+            $statusIcon = switch ($ruleStatus) { "PASS" { "&#10003;" } "FAIL" { "&#10007;" } default { "?" } }
+            $rulesHtml += "<li class='$statusClass'><span class='rule-status'>$statusIcon</span><code>$(Escape-Html $r.Rules[$i])</code></li>"
         }
         $rulesHtml += "</ul>"
         $detailsContent += $rulesHtml
     }
+    
+    $valueContent = if ($r.Value) { Escape-Html ($r.Value.ToString()) } else { "[No value captured]" }
+    $valueLines = $valueContent -split "`n"
+    $valueHtml = ($valueLines | ForEach-Object { "<div class='value-line'>$_</div>" }) -join ""
+    $detailsContent += "<h4>Result Values</h4><div class='result-value'>$valueHtml</div>"
     
     $hasDetails = $detailsContent -ne ""
     $expandBtn = if ($hasDetails) { "<button class='expand-btn' onclick='toggleDetails($rowIndex)'>View</button>" } else { "-" }
     $detailsDiv = if ($hasDetails) { "<div class='details' id='details-$rowIndex'>$detailsContent</div>" } else { "" }
     
     $titleEsc = Escape-Html $r.Title
-    $valueDisplay = if ($r.Value) { 
-        $v = $r.Value.ToString()
-        if ($v.Length -gt 50) { $v = $v.Substring(0, 50) + "..." }
-        Escape-Html $v
-    } else { "-" }
-    
-    $htmlRows += "<tr data-status='$($r.Status)'><td class='cis-id'>$($r.CIS_ID)</td><td class='title-cell'>$titleEsc$detailsDiv</td><td><span class='s s-$($r.Status)'>$($r.Status)</span></td><td>$valueDisplay</td><td>$expandBtn</td></tr>`n"
+    $htmlRows += "<tr data-status='$($r.Status)'><td class='cis-id'>$($r.CIS_ID)</td><td class='title-cell'>$titleEsc$detailsDiv</td><td><span class='s s-$($r.Status)'>$($r.Status)</span></td><td>$expandBtn</td></tr>`n"
     $rowIndex++
 }
 
@@ -558,12 +557,19 @@ tr:hover{background:#f8f9fa}
 .details p{color:#555;font-size:13px;margin:0}
 .tag{display:inline-block;background:#e8f0fe;color:#1a73e8;padding:3px 8px;border-radius:3px;font-size:11px;margin:2px}
 .footer{margin-top:30px;padding-top:20px;border-top:1px solid #e0e0e0;color:#999;text-align:center;font-size:12px}
-.cis-id{font-family:monospace;color:#1a73e8}
-.title-cell{max-width:450px}
+.cis-id{font-family:monospace;color:#1a73e8;width:80px}
+.title-cell{max-width:none}
 .header{background:#fff;padding:20px;border-radius:8px;margin-bottom:20px;box-shadow:0 2px 4px rgba(0,0,0,0.05)}
 .rules-list{margin:5px 0 0 0;padding-left:0;list-style:none}
-.rules-list li{margin:5px 0;padding:8px;background:#fff;border:1px solid #e0e0e0;border-radius:4px}
+.rules-list li{margin:5px 0;padding:8px 8px 8px 35px;background:#fff;border:1px solid #e0e0e0;border-radius:4px;position:relative}
 .rules-list code{font-family:'Consolas','Courier New',monospace;font-size:11px;color:#333;word-break:break-all;display:block}
+.rule-status{position:absolute;left:10px;top:50%;transform:translateY(-50%);font-weight:bold;font-size:14px}
+.rule-pass{border-left:3px solid #34a853}.rule-pass .rule-status{color:#34a853}
+.rule-fail{border-left:3px solid #ea4335}.rule-fail .rule-status{color:#ea4335}
+.rule-unknown{border-left:3px solid #999}.rule-unknown .rule-status{color:#999}
+.result-value{background:#e3f2fd;border:1px solid #2196f3;border-radius:4px;padding:10px;margin-top:5px}
+.value-line{font-family:'Consolas','Courier New',monospace;font-size:12px;color:#1565c0;padding:3px 0;border-bottom:1px dashed #90caf9}
+.value-line:last-child{border-bottom:none}
 </style>
 </head>
 <body>
@@ -587,7 +593,7 @@ tr:hover{background:#f8f9fa}
 <button class="btn" onclick="toggleAll()">Expand All</button>
 </div>
 <table id="results">
-<thead><tr><th style="width:80px">CIS ID</th><th>Title</th><th style="width:80px">Status</th><th style="width:150px">Value</th><th style="width:70px">Details</th></tr></thead>
+<thead><tr><th style="width:80px">CIS ID</th><th>Title</th><th style="width:80px">Status</th><th style="width:70px">Details</th></tr></thead>
 <tbody>
 $htmlRows
 </tbody>
@@ -598,12 +604,13 @@ function filterResults(s){document.querySelectorAll('.btn').forEach(b=>b.classLi
 function toggleDetails(i){const d=document.getElementById('details-'+i);if(d)d.classList.toggle('show');}
 function toggleAll(){allExpanded=!allExpanded;document.querySelectorAll('.details').forEach(d=>{allExpanded?d.classList.add('show'):d.classList.remove('show')});event.target.textContent=allExpanded?'Collapse All':'Expand All';}
 </script>
-<div class="footer">Generated by CIS Scanner v2.5 | CodeSecure Solutions | $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")</div>
+<div class="footer">Generated by CIS Scanner v2.5.1 | CodeSecure Solutions | $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")</div>
 </body>
 </html>
 "@
 
 $HTML | Out-File -FilePath $HTMLReport -Encoding UTF8
+Write-Host "[+] HTML saved: $HTMLReport" -ForegroundColor Green
 
 #==============================================================================
 # DONE
@@ -619,9 +626,16 @@ Write-Host "[+] Pass:  $PassCount" -ForegroundColor Green
 Write-Host "[+] Fail:  $FailCount" -ForegroundColor Red
 Write-Host "[+] N/A:   $NACount" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "[+] HTML: $HTMLReport" -ForegroundColor Green
-Write-Host "[+] CSV:  $CSVReport" -ForegroundColor Green
-Write-Host ""
 
+# Open report
 Start-Process $HTMLReport
+
+} catch {
+    Write-Host ""
+    Write-Host "==================== ERROR ====================" -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
+    Write-Host "Line: $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Yellow
+    Write-Host "===============================================" -ForegroundColor Red
+}
+
 Read-Host "Press Enter to exit"
